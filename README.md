@@ -144,20 +144,7 @@ This contract is designed for community internet funding and can be extended wit
 *Built with ❤️ using Clarity and Stacks blockchain*
 ```
 
-**Git Commit Message:**
-```
 
 ```
 
-**GitHub Pull Request Title:**
 ```
-🌐 Add Decentralized Internet Subscription DAO Smart Contract
-```
-
-**GitHub Pull Request Description:**
-```
-## Summary
-Added a comprehensive Clarity smart contract for a Decentralized Internet Subscription DAO that enables communities to pool funds and collectively manage internet subscriptions through democratic governance.
-
-## Features Added
-- 👥 **Membership System**: Join DAO with membership fees and track contributions
