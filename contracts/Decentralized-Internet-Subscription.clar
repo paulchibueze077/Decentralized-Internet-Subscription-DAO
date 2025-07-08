@@ -15,6 +15,14 @@
 (define-data-var membership-fee uint u1000000)
 (define-data-var min-proposal-amount uint u500000)
 
+(define-constant ERR_NO_REWARDS_AVAILABLE (err u110))
+(define-constant ERR_REWARDS_ALREADY_CLAIMED (err u111))
+
+(define-constant BRONZE_THRESHOLD u5000000)
+(define-constant SILVER_THRESHOLD u10000000)
+(define-constant GOLD_THRESHOLD u25000000)
+(define-constant PLATINUM_THRESHOLD u50000000)
+
 (define-map members principal 
   {
     contribution: uint,
@@ -236,5 +244,82 @@
   (match (map-get? internet-subscriptions subscription-id)
     subscription (and (get active subscription) (> (get funded-until subscription) stacks-block-height))
     false
+  )
+)
+
+(define-map member-rewards principal
+  {
+    reputation-points: uint,
+    milestone-level: uint,
+    rewards-claimed: uint
+  }
+)
+
+(define-private (calculate-reward-points (total-contribution uint))
+  (if (>= total-contribution PLATINUM_THRESHOLD)
+    u500
+    (if (>= total-contribution GOLD_THRESHOLD)
+      u250
+      (if (>= total-contribution SILVER_THRESHOLD)
+        u100
+        (if (>= total-contribution BRONZE_THRESHOLD)
+          u50
+          u0
+        )
+      )
+    )
+  )
+)
+
+(define-private (get-milestone-level (total-contribution uint))
+  (if (>= total-contribution PLATINUM_THRESHOLD)
+    u4
+    (if (>= total-contribution GOLD_THRESHOLD)
+      u3
+      (if (>= total-contribution SILVER_THRESHOLD)
+        u2
+        (if (>= total-contribution BRONZE_THRESHOLD)
+          u1
+          u0
+        )
+      )
+    )
+  )
+)
+
+(define-public (claim-rewards)
+  (let ((member-data (unwrap! (map-get? members tx-sender) ERR_NOT_MEMBER))
+        (current-rewards (default-to {reputation-points: u0, milestone-level: u0, rewards-claimed: u0}
+                          (map-get? member-rewards tx-sender)))
+        (total-contribution (get contribution member-data))
+        (new-reputation-points (calculate-reward-points total-contribution))
+        (new-milestone-level (get-milestone-level total-contribution)))
+    (asserts! (get active member-data) ERR_NOT_AUTHORIZED)
+    (asserts! (> new-reputation-points (get reputation-points current-rewards)) ERR_NO_REWARDS_AVAILABLE)
+    (map-set member-rewards tx-sender
+      {
+        reputation-points: new-reputation-points,
+        milestone-level: new-milestone-level,
+        rewards-claimed: (+ (get rewards-claimed current-rewards) 
+                           (- new-reputation-points (get reputation-points current-rewards)))
+      }
+    )
+    (ok new-reputation-points)
+  )
+)
+
+(define-read-only (get-member-rewards (member principal))
+  (map-get? member-rewards member)
+)
+
+(define-read-only (get-available-rewards (member principal))
+  (match (map-get? members member)
+    member-data
+    (let ((total-contribution (get contribution member-data))
+          (current-rewards (default-to {reputation-points: u0, milestone-level: u0, rewards-claimed: u0}
+                            (map-get? member-rewards member)))
+          (available-points (calculate-reward-points total-contribution)))
+      (some (- available-points (get reputation-points current-rewards))))
+    none
   )
 )
