@@ -23,6 +23,15 @@
 (define-constant GOLD_THRESHOLD u25000000)
 (define-constant PLATINUM_THRESHOLD u50000000)
 
+(define-constant ERR_EMERGENCY_NOT_FOUND (err u112))
+(define-constant ERR_INSUFFICIENT_EMERGENCY_FUNDS (err u113))
+(define-constant ERR_ALREADY_SIGNED (err u114))
+(define-constant ERR_NOT_ENOUGH_SIGNATURES (err u115))
+(define-constant REQUIRED_SIGNATURES u3)
+
+(define-data-var emergency-fund uint u0)
+(define-data-var next-emergency-id uint u1)
+
 (define-map members principal 
   {
     contribution: uint,
@@ -322,4 +331,85 @@
       (some (- available-points (get reputation-points current-rewards))))
     none
   )
+)
+
+
+(define-map emergency-proposals uint
+  {
+    title: (string-ascii 80),
+    amount: uint,
+    recipient: principal,
+    signatures: uint,
+    executed: bool,
+    created-at: uint
+  }
+)
+
+(define-map emergency-signatures {proposal-id: uint, signer: principal} bool)
+
+(define-public (contribute-emergency (amount uint))
+  (let ((member-data (unwrap! (map-get? members tx-sender) ERR_NOT_MEMBER)))
+    (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+    (asserts! (get active member-data) ERR_NOT_AUTHORIZED)
+    (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+    (var-set emergency-fund (+ (var-get emergency-fund) amount))
+    (ok true)
+  )
+)
+
+(define-public (create-emergency-proposal (title (string-ascii 80)) (amount uint) (recipient principal))
+  (let ((proposal-id (var-get next-emergency-id))
+        (member-data (unwrap! (map-get? members tx-sender) ERR_NOT_MEMBER)))
+    (asserts! (get active member-data) ERR_NOT_AUTHORIZED)
+    (asserts! (>= (get contribution member-data) GOLD_THRESHOLD) ERR_NOT_AUTHORIZED)
+    (asserts! (<= amount (var-get emergency-fund)) ERR_INSUFFICIENT_EMERGENCY_FUNDS)
+    (map-set emergency-proposals proposal-id
+      {
+        title: title,
+        amount: amount,
+        recipient: recipient,
+        signatures: u1,
+        executed: false,
+        created-at: stacks-block-height
+      }
+    )
+    (map-set emergency-signatures {proposal-id: proposal-id, signer: tx-sender} true)
+    (var-set next-emergency-id (+ proposal-id u1))
+    (ok proposal-id)
+  )
+)
+
+(define-public (sign-emergency (proposal-id uint))
+  (let ((proposal-data (unwrap! (map-get? emergency-proposals proposal-id) ERR_EMERGENCY_NOT_FOUND))
+        (member-data (unwrap! (map-get? members tx-sender) ERR_NOT_MEMBER))
+        (signature-key {proposal-id: proposal-id, signer: tx-sender}))
+    (asserts! (get active member-data) ERR_NOT_AUTHORIZED)
+    (asserts! (>= (get contribution member-data) SILVER_THRESHOLD) ERR_NOT_AUTHORIZED)
+    (asserts! (not (get executed proposal-data)) ERR_NOT_AUTHORIZED)
+    (asserts! (is-none (map-get? emergency-signatures signature-key)) ERR_ALREADY_SIGNED)
+    (map-set emergency-signatures signature-key true)
+    (map-set emergency-proposals proposal-id
+      (merge proposal-data {signatures: (+ (get signatures proposal-data) u1)})
+    )
+    (ok true)
+  )
+)
+
+(define-public (execute-emergency (proposal-id uint))
+  (let ((proposal-data (unwrap! (map-get? emergency-proposals proposal-id) ERR_EMERGENCY_NOT_FOUND)))
+    (asserts! (not (get executed proposal-data)) ERR_NOT_AUTHORIZED)
+    (asserts! (>= (get signatures proposal-data) REQUIRED_SIGNATURES) ERR_NOT_ENOUGH_SIGNATURES)
+    (try! (as-contract (stx-transfer? (get amount proposal-data) tx-sender (get recipient proposal-data))))
+    (var-set emergency-fund (- (var-get emergency-fund) (get amount proposal-data)))
+    (map-set emergency-proposals proposal-id (merge proposal-data {executed: true}))
+    (ok true)
+  )
+)
+
+(define-read-only (get-emergency-fund)
+  (var-get emergency-fund)
+)
+
+(define-read-only (get-emergency-proposal (proposal-id uint))
+  (map-get? emergency-proposals proposal-id)
 )
