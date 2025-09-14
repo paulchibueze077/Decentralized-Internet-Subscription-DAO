@@ -29,6 +29,11 @@
 (define-constant ERR_NOT_ENOUGH_SIGNATURES (err u115))
 (define-constant REQUIRED_SIGNATURES u3)
 
+(define-constant MINIMUM_STAKE_PERIOD u4320)
+(define-constant MAXIMUM_STAKE_PERIOD u25920)
+(define-constant BASE_MULTIPLIER u100)
+(define-constant STAKE_BONUS_RATE u5)
+
 (define-data-var emergency-fund uint u0)
 (define-data-var next-emergency-id uint u1)
 
@@ -412,4 +417,90 @@
 
 (define-read-only (get-emergency-proposal (proposal-id uint))
   (map-get? emergency-proposals proposal-id)
+)
+
+
+(define-map member-stakes principal
+  {
+    staked-amount: uint,
+    stake-start: uint,
+    stake-end: uint,
+    accumulated-rewards: uint,
+    last-claim: uint
+  }
+)
+
+(define-data-var total-staked uint u0)
+
+(define-public (stake-tokens (amount uint) (lock-period uint))
+  (let ((member-data (unwrap! (map-get? members tx-sender) ERR_NOT_MEMBER))
+        (current-stake (default-to 
+          {staked-amount: u0, stake-start: u0, stake-end: u0, accumulated-rewards: u0, last-claim: u0}
+          (map-get? member-stakes tx-sender))))
+    (asserts! (get active member-data) ERR_NOT_AUTHORIZED)
+    (asserts! (>= amount u100000) ERR_INVALID_AMOUNT)
+    (asserts! (>= lock-period MINIMUM_STAKE_PERIOD) ERR_INVALID_DURATION)
+    (asserts! (<= lock-period MAXIMUM_STAKE_PERIOD) ERR_INVALID_DURATION)
+    (asserts! (is-eq (get staked-amount current-stake) u0) ERR_ALREADY_MEMBER)
+    (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+    (map-set member-stakes tx-sender
+      {
+        staked-amount: amount,
+        stake-start: stacks-block-height,
+        stake-end: (+ stacks-block-height lock-period),
+        accumulated-rewards: u0,
+        last-claim: stacks-block-height
+      }
+    )
+    (var-set total-staked (+ (var-get total-staked) amount))
+    (ok true)
+  )
+)
+
+(define-public (unstake-tokens)
+  (let ((stake-data (unwrap! (map-get? member-stakes tx-sender) ERR_NOT_MEMBER)))
+    (asserts! (>= stacks-block-height (get stake-end stake-data)) ERR_VOTING_ENDED)
+    (asserts! (> (get staked-amount stake-data) u0) ERR_INVALID_AMOUNT)
+    (let ((total-return (+ (get staked-amount stake-data) (get accumulated-rewards stake-data))))
+      (try! (as-contract (stx-transfer? total-return tx-sender tx-sender)))
+      (var-set total-staked (- (var-get total-staked) (get staked-amount stake-data)))
+      (map-delete member-stakes tx-sender)
+      (ok total-return)
+    )
+  )
+)
+
+(define-public (claim-staking-rewards)
+  (let ((stake-data (unwrap! (map-get? member-stakes tx-sender) ERR_NOT_MEMBER))
+        (time-elapsed (- stacks-block-height (get last-claim stake-data))))
+    (asserts! (> time-elapsed u144) ERR_NO_REWARDS_AVAILABLE)
+    (let ((reward-rate (/ (* (get staked-amount stake-data) STAKE_BONUS_RATE) u10000))
+          (new-rewards (* reward-rate (/ time-elapsed u144))))
+      (map-set member-stakes tx-sender
+        (merge stake-data 
+          {
+            accumulated-rewards: (+ (get accumulated-rewards stake-data) new-rewards),
+            last-claim: stacks-block-height
+          }
+        )
+      )
+      (ok new-rewards)
+    )
+  )
+)
+
+(define-private (get-voting-multiplier (voter principal))
+  (match (map-get? member-stakes voter)
+    stake-data 
+    (let ((remaining-time (if (> (get stake-end stake-data) stacks-block-height)
+                            (- (get stake-end stake-data) stacks-block-height)
+                            u0)))
+      (+ BASE_MULTIPLIER (/ (* remaining-time u50) u4320))
+    )
+    BASE_MULTIPLIER
+  )
+)
+
+(define-read-only (get-stake-info (member principal))
+  (map-get? member-stakes member)
 )
