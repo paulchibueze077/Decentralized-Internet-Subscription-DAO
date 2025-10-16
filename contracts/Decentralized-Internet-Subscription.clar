@@ -34,6 +34,12 @@
 (define-constant BASE_MULTIPLIER u100)
 (define-constant STAKE_BONUS_RATE u5)
 
+(define-constant ERR_INSUFFICIENT_CREDITS (err u116))
+(define-constant ERR_SUBSCRIPTION_NOT_ACTIVE (err u117))
+(define-constant ERR_ALREADY_REGISTERED (err u118))
+(define-constant ERR_NOT_REGISTERED (err u119))
+(define-constant CREDIT_MULTIPLIER u10)
+
 (define-data-var emergency-fund uint u0)
 (define-data-var next-emergency-id uint u1)
 
@@ -503,4 +509,84 @@
 
 (define-read-only (get-stake-info (member principal))
   (map-get? member-stakes member)
+)
+
+(define-map subscription-members {subscription-id: uint, member: principal}
+  {
+    enrolled-at: uint,
+    share-percentage: uint,
+    active: bool
+  }
+)
+
+(define-map member-usage-credits principal
+  {
+    available-credits: uint,
+    total-earned: uint,
+    total-spent: uint
+  }
+)
+
+(define-data-var total-subscription-members uint u0)
+
+(define-private (calculate-member-credits (contribution-amount uint))
+  (/ (* contribution-amount CREDIT_MULTIPLIER) u1000000)
+)
+
+(define-public (register-for-subscription (subscription-id uint))
+  (let ((subscription-data (unwrap! (map-get? internet-subscriptions subscription-id) ERR_PROPOSAL_NOT_FOUND))
+        (member-data (unwrap! (map-get? members tx-sender) ERR_NOT_MEMBER))
+        (enrollment-key {subscription-id: subscription-id, member: tx-sender})
+        (current-credits (default-to {available-credits: u0, total-earned: u0, total-spent: u0}
+                         (map-get? member-usage-credits tx-sender)))
+        (required-credits (calculate-member-credits (get monthly-cost subscription-data)))
+        (new-earned-credits (calculate-member-credits (get contribution member-data))))
+    (asserts! (get active member-data) ERR_NOT_AUTHORIZED)
+    (asserts! (get active subscription-data) ERR_SUBSCRIPTION_NOT_ACTIVE)
+    (asserts! (is-none (map-get? subscription-members enrollment-key)) ERR_ALREADY_REGISTERED)
+    (let ((updated-credits (+ (get available-credits current-credits) new-earned-credits)))
+      (asserts! (>= updated-credits required-credits) ERR_INSUFFICIENT_CREDITS)
+      (map-set subscription-members enrollment-key
+        {
+          enrolled-at: stacks-block-height,
+          share-percentage: u100,
+          active: true
+        }
+      )
+      (map-set member-usage-credits tx-sender
+        {
+          available-credits: (- updated-credits required-credits),
+          total-earned: (+ (get total-earned current-credits) new-earned-credits),
+          total-spent: (+ (get total-spent current-credits) required-credits)
+        }
+      )
+      (var-set total-subscription-members (+ (var-get total-subscription-members) u1))
+      (ok true)
+    )
+  )
+)
+
+(define-public (unregister-from-subscription (subscription-id uint))
+  (let ((enrollment-key {subscription-id: subscription-id, member: tx-sender})
+        (enrollment-data (unwrap! (map-get? subscription-members enrollment-key) ERR_NOT_REGISTERED)))
+    (asserts! (get active enrollment-data) ERR_NOT_AUTHORIZED)
+    (map-set subscription-members enrollment-key (merge enrollment-data {active: false}))
+    (var-set total-subscription-members (- (var-get total-subscription-members) u1))
+    (ok true)
+  )
+)
+
+(define-read-only (get-subscription-enrollment (subscription-id uint) (member principal))
+  (map-get? subscription-members {subscription-id: subscription-id, member: member})
+)
+
+(define-read-only (get-usage-credits (member principal))
+  (map-get? member-usage-credits member)
+)
+
+(define-read-only (calculate-required-credits (subscription-id uint))
+  (match (map-get? internet-subscriptions subscription-id)
+    subscription-data (some (calculate-member-credits (get monthly-cost subscription-data)))
+    none
+  )
 )
