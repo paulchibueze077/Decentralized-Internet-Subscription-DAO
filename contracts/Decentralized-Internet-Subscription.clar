@@ -40,6 +40,10 @@
 (define-constant ERR_NOT_REGISTERED (err u119))
 (define-constant CREDIT_MULTIPLIER u10)
 
+(define-constant ERR_SELF_REFERRAL (err u120))
+(define-constant ERR_INVALID_REFERRER (err u121))
+(define-constant REFERRAL_BONUS_RATE u10)
+
 (define-data-var emergency-fund uint u0)
 (define-data-var next-emergency-id uint u1)
 
@@ -587,6 +591,92 @@
 (define-read-only (calculate-required-credits (subscription-id uint))
   (match (map-get? internet-subscriptions subscription-id)
     subscription-data (some (calculate-member-credits (get monthly-cost subscription-data)))
+    none
+  )
+)
+
+
+(define-map member-referrals principal
+  {
+    referrer: (optional principal),
+    referral-count: uint,
+    total-referral-rewards: uint,
+    referral-credits: uint
+  }
+)
+
+(define-public (join-dao-with-referral (referrer (optional principal)))
+  (let ((membership-cost (var-get membership-fee)))
+    (asserts! (is-none (map-get? members tx-sender)) ERR_ALREADY_MEMBER)
+    (match referrer
+      referrer-principal
+      (begin
+        (asserts! (not (is-eq referrer-principal tx-sender)) ERR_SELF_REFERRAL)
+        (asserts! (is-some (map-get? members referrer-principal)) ERR_INVALID_REFERRER)
+        (let ((referrer-data (default-to 
+                {referrer: none, referral-count: u0, total-referral-rewards: u0, referral-credits: u0}
+                (map-get? member-referrals referrer-principal)))
+              (referral-bonus (/ (* membership-cost REFERRAL_BONUS_RATE) u100)))
+          (map-set member-referrals referrer-principal
+            {
+              referrer: (get referrer referrer-data),
+              referral-count: (+ (get referral-count referrer-data) u1),
+              total-referral-rewards: (+ (get total-referral-rewards referrer-data) referral-bonus),
+              referral-credits: (+ (get referral-credits referrer-data) 
+                                  (calculate-member-credits referral-bonus))
+            }
+          )
+          (let ((current-credits (default-to {available-credits: u0, total-earned: u0, total-spent: u0}
+                                  (map-get? member-usage-credits referrer-principal))))
+            (map-set member-usage-credits referrer-principal
+              {
+                available-credits: (+ (get available-credits current-credits) 
+                                     (calculate-member-credits referral-bonus)),
+                total-earned: (+ (get total-earned current-credits) 
+                                (calculate-member-credits referral-bonus)),
+                total-spent: (get total-spent current-credits)
+              }
+            )
+          )
+          (map-set member-referrals tx-sender
+            {
+              referrer: (some referrer-principal),
+              referral-count: u0,
+              total-referral-rewards: u0,
+              referral-credits: u0
+            }
+          )
+        )
+      )
+      (map-set member-referrals tx-sender
+        {
+          referrer: none,
+          referral-count: u0,
+          total-referral-rewards: u0,
+          referral-credits: u0
+        }
+      )
+    )
+    (try! (stx-transfer? membership-cost tx-sender (as-contract tx-sender)))
+    (map-set members tx-sender
+      {
+        contribution: membership-cost,
+        joined-at: stacks-block-height,
+        active: true
+      }
+    )
+    (var-set total-pool (+ (var-get total-pool) membership-cost))
+    (ok true)
+  )
+)
+
+(define-read-only (get-referral-stats (member principal))
+  (map-get? member-referrals member)
+)
+
+(define-read-only (get-referrer (member principal))
+  (match (map-get? member-referrals member)
+    referral-data (get referrer referral-data)
     none
   )
 )
